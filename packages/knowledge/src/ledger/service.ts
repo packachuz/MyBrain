@@ -213,6 +213,30 @@ export class LedgerAndBacklogService {
         "evidence id",
       );
 
+      const existingRow = await this.store.db.query<{
+        target_subject: string | null;
+      }>(`SELECT target_subject FROM evidence_ledger WHERE id = $1 LIMIT 1`, [
+        validated.id,
+      ]);
+      const previousSubject = existingRow.rows[0]?.target_subject;
+      let staleOldPath: string | null = null;
+      if (previousSubject && previousSubject !== validated.targetSubject) {
+        try {
+          const candidateOldPath = resolveNestedFilePath(
+            this.store.ledgerDir,
+            previousSubject,
+            validated.id,
+            "targetSubject",
+            "evidence id",
+          );
+          if (path.resolve(candidateOldPath) !== path.resolve(filePath)) {
+            staleOldPath = candidateOldPath;
+          }
+        } catch {
+          // Ignore invalid legacy subject path
+        }
+      }
+
       const bodyText =
         body ?? `# ${validated.id} (${validated.claimKind})\n\n${validated.statement}\n`;
       const serialized = serializeMarkdownDocument(
@@ -226,6 +250,16 @@ export class LedgerAndBacklogService {
       await this.store.db.transaction(async (tx) => {
         await upsertEvidenceRow(tx, parsed.frontmatter, parsed.contentHash);
       });
+
+      if (staleOldPath) {
+        try {
+          await fs.unlink(staleOldPath);
+        } catch (err: unknown) {
+          if ((err as { code?: string })?.code !== "ENOENT") {
+            throw err;
+          }
+        }
+      }
 
       return {
         ...parsed.frontmatter,

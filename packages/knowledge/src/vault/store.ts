@@ -959,7 +959,7 @@ export class VaultStore {
       existingById.set(row.id, row.content_hash);
     }
 
-    const diskIds = new Set<string>();
+    const diskPathsById = new Map<string, string>();
     const toIndex: Array<{ entry: T; contentHash: string }> = [];
     let unchanged = 0;
 
@@ -971,7 +971,13 @@ export class VaultStore {
         typeof rawFm.id === "string" && rawFm.id.trim() !== ""
           ? rawFm.id.trim()
           : path.basename(filePath, ".md");
-      diskIds.add(id);
+      const conflictingPath = diskPathsById.get(id);
+      if (conflictingPath !== undefined) {
+        throw new Error(
+          `Duplicate ${opts.table} id "${id}" detected across "${conflictingPath}" and "${filePath}"`,
+        );
+      }
+      diskPathsById.set(id, filePath);
 
       const existingHash = existingById.get(id);
       if (existingHash !== undefined && existingHash === parsed.contentHash) {
@@ -985,7 +991,7 @@ export class VaultStore {
 
     const deletedIds: string[] = [];
     for (const id of existingById.keys()) {
-      if (!diskIds.has(id)) {
+      if (!diskPathsById.has(id)) {
         deletedIds.push(id);
       }
     }

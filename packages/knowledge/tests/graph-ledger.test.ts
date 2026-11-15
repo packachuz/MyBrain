@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -530,6 +531,112 @@ describe("LedgerAndBacklogService (REA Evidence Ledger & Requirements Backlog)",
 
       const evidenceAfter = await service.listEvidence({ targetSubject: "core-arch" });
       expect(evidenceAfter.map((e) => e.id)).toEqual(["UNK-100"]);
+    } finally {
+      await store.close();
+    }
+  });
+
+  test("addEvidence removes stale old-subject .md file when targetSubject changes so reindexVault stays clean", async () => {
+    const vaultRoot = createTempVault();
+    const db = await createPgliteClient();
+    const store = await VaultStore.open({ vaultRoot, db });
+    const service = new LedgerAndBacklogService(store);
+
+    try {
+      await service.addEvidence({
+        id: "OBS-MOVE",
+        targetSubject: "subj-a",
+        claimKind: "observation",
+        statement: "Initially recorded under subj-a.",
+      });
+
+      const oldPath = path.join(
+        vaultRoot,
+        "vault",
+        "ledger",
+        "subj-a",
+        "OBS-MOVE.md",
+      );
+      const newPath = path.join(
+        vaultRoot,
+        "vault",
+        "ledger",
+        "subj-b",
+        "OBS-MOVE.md",
+      );
+      expect(existsSync(oldPath)).toBe(true);
+
+      await service.addEvidence({
+        id: "OBS-MOVE",
+        targetSubject: "subj-b",
+        claimKind: "observation",
+        statement: "Moved to subj-b.",
+      });
+
+      expect(existsSync(newPath)).toBe(true);
+      expect(existsSync(oldPath)).toBe(false);
+
+      const syncReport = await store.syncVault();
+      expect(syncReport.scanned).toBe(1);
+      expect(syncReport.indexed).toBe(0);
+      expect(syncReport.unchanged).toBe(1);
+
+      const reindexReport = await store.reindexVault();
+      expect(reindexReport.scanned).toBe(1);
+      expect(reindexReport.indexed).toBe(1);
+
+      const rows = await service.listEvidence({});
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.targetSubject).toBe("subj-b");
+    } finally {
+      await store.close();
+    }
+  });
+
+  test("syncVault fails loudly when two markdown files in vault/ledger share the same id", async () => {
+    const vaultRoot = createTempVault();
+    const db = await createPgliteClient();
+    const store = await VaultStore.open({ vaultRoot, db });
+
+    try {
+      const dirA = path.join(vaultRoot, "vault", "ledger", "subj-a");
+      const dirB = path.join(vaultRoot, "vault", "ledger", "subj-b");
+      mkdirSync(dirA, { recursive: true });
+      mkdirSync(dirB, { recursive: true });
+
+      const fileA = path.join(dirA, "OBS-DUP.md");
+      const fileB = path.join(dirB, "OBS-DUP.md");
+
+      writeFileSync(
+        fileA,
+        [
+          "---",
+          "id: OBS-DUP",
+          "targetSubject: subj-a",
+          "claimKind: observation",
+          "statement: First copy",
+          "---",
+          "",
+          "First copy",
+        ].join("\n"),
+        "utf8",
+      );
+      writeFileSync(
+        fileB,
+        [
+          "---",
+          "id: OBS-DUP",
+          "targetSubject: subj-b",
+          "claimKind: observation",
+          "statement: Second copy",
+          "---",
+          "",
+          "Second copy",
+        ].join("\n"),
+        "utf8",
+      );
+
+      await expect(store.syncVault()).rejects.toThrow(/OBS-DUP/);
     } finally {
       await store.close();
     }
