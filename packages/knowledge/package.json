@@ -6,7 +6,9 @@
   "exports": {
     "./db/client": "./src/db/client.ts",
     "./db/schema": "./src/db/schema.ts",
-    "./schema-pack/loader": "./src/schema-pack/loader.ts"
+    "./schema-pack/loader": "./src/schema-pack/loader.ts",
+    "./markdown/frontmatter": "./src/markdown/frontmatter.ts",
+    "./markdown/chunker": "./src/markdown/chunker.ts"
   },
   "scripts": {
     "test": "bun test",
