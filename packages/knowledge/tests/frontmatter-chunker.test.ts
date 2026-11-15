@@ -282,6 +282,21 @@ describe("Heading-Aware Chunker", () => {
     ).toThrow(RangeError);
   });
 
+  it("safely defaults overlapWords when smaller custom maxWords is provided", () => {
+    const words = Array.from({ length: 60 }, (_, i) => `word${i}`).join(" ");
+    const body = `# Sub\n${words}`;
+
+    // maxWords < default overlapWords (60) must succeed without RangeError
+    const chunks = chunkMarkdown(body, { maxWords: 30 });
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks[0]!.wordCount).toBeLessThanOrEqual(30);
+
+    // Explicit invalid overlap still throws RangeError
+    expect(() =>
+      chunkMarkdown(body, { maxWords: 30, overlapWords: 30 }),
+    ).toThrow(RangeError);
+  });
+
   it("tracks heading stack popping correctly across hierarchy levels", () => {
     const body = [
       "# Heading 1",

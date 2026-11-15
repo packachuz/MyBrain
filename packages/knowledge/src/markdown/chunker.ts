@@ -34,13 +34,17 @@ export function chunkMarkdown(
   }
 
   const maxWords = opts?.maxWords ?? 450;
-  const overlapWords = opts?.overlapWords ?? 60;
-
   if (maxWords <= 0) {
     throw new RangeError(
       `maxWords must be a positive integer, received ${maxWords}`,
     );
   }
+
+  const overlapWords =
+    opts?.overlapWords !== undefined
+      ? opts.overlapWords
+      : Math.min(60, Math.floor(maxWords / 4));
+
   if (overlapWords < 0) {
     throw new RangeError(
       `overlapWords cannot be negative, received ${overlapWords}`,
