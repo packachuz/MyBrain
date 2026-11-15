@@ -3,14 +3,18 @@ import { type Dirent, promises as fs } from "node:fs";
 import path from "node:path";
 import {
   acquireVaultLock,
+  EvidenceEntrySchema,
   normalizeLineEndings,
   PageFrontmatterSchema,
+  RequirementBacklogSchema,
   resolveSafeVaultPath,
   sha256Hex,
   VaultPathError,
   type EmbeddingProvider,
+  type EvidenceEntry,
   type PageFrontmatter,
   type RelationEdge,
+  type RequirementBacklog,
   type SchemaPack,
   type VaultLockHandle,
 } from "@mybrain/shared";
@@ -106,7 +110,9 @@ interface PreparedPageIndex {
   embeddings: (number[] | null)[];
 }
 
-function assertCleanSegment(value: string, label: string): void {
+const WINDOWS_RESERVED_CHARS = /[<>"|?*]/;
+
+export function assertCleanSegment(value: string, label: string): void {
   if (typeof value !== "string" || value.trim() === "") {
     throw new VaultPathError(`Invalid ${label}: must be a non-empty string`);
   }
@@ -119,6 +125,70 @@ function assertCleanSegment(value: string, label: string): void {
   if (value.includes("\\")) {
     throw new VaultPathError(`Backslash is not allowed in ${label}: ${value}`);
   }
+  if (WINDOWS_RESERVED_CHARS.test(value)) {
+    throw new VaultPathError(`Invalid filename character in ${label}: ${value}`);
+  }
+}
+
+/**
+ * Validates and resolves a single `.md` file directly under `baseDir` (e.g. `vault/backlog/<id>.md`).
+ */
+export function resolveSingleSegmentFilePath(
+  baseDir: string,
+  id: string,
+  label = "id",
+): string {
+  assertCleanSegment(id, label);
+  if (id.includes("/") || id === "." || id === "..") {
+    resolveSafeVaultPath(baseDir, ...id.split("/"));
+    throw new VaultPathError(`Invalid ${label} path segment: ${id}`);
+  }
+  const filename = id.endsWith(".md") ? id : `${id}.md`;
+  return resolveSafeVaultPath(baseDir, filename);
+}
+
+/**
+ * Validates and resolves a nested `<subpath>/<id>.md` path under `baseDir` (e.g. `vault/ledger/<subject>/<id>.md`).
+ */
+export function resolveNestedFilePath(
+  baseDir: string,
+  subpath: string,
+  id: string,
+  subpathLabel = "subject",
+  idLabel = "id",
+): string {
+  assertCleanSegment(subpath, subpathLabel);
+  assertCleanSegment(id, idLabel);
+
+  const rawSegments = subpath.split("/");
+  if (rawSegments.some((seg) => seg === "" || seg === "." || seg === "..")) {
+    resolveSafeVaultPath(baseDir, ...rawSegments);
+    throw new VaultPathError(`Invalid ${subpathLabel} path segments: ${subpath}`);
+  }
+
+  const subjectDir = resolveSafeVaultPath(baseDir, ...rawSegments);
+  return resolveSingleSegmentFilePath(subjectDir, id, idLabel);
+}
+
+/**
+ * Validates and resolves an existing canonical page slug (`<type>/<slug>`) to its `.md` path under `pagesDir`.
+ */
+export function resolvePageFilePath(
+  pagesDir: string,
+  canonicalSlug: string,
+): string {
+  assertCleanSegment(canonicalSlug, "slug");
+  const segments = canonicalSlug.split("/");
+  if (
+    segments.length === 0 ||
+    segments.some((seg) => seg === "" || seg === "." || seg === "..")
+  ) {
+    resolveSafeVaultPath(pagesDir, ...segments);
+    throw new VaultPathError(`Invalid page slug: ${canonicalSlug}`);
+  }
+  const last = segments[segments.length - 1]!;
+  const filename = last.endsWith(".md") ? last : `${last}.md`;
+  return resolveSafeVaultPath(pagesDir, ...segments.slice(0, -1), filename);
 }
 
 /**
@@ -330,6 +400,133 @@ async function loadVaultSchemaPacks(
   return packs;
 }
 
+export interface RelationDbRowInput {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  relationType: string;
+  weight: number;
+  evidenceRef: string | null;
+  createdAt: string;
+}
+
+/** Upserts a relation edge into PGLite inside an active transaction. */
+export async function upsertRelationRow(
+  tx: DbTransactionClient,
+  rel: RelationDbRowInput,
+): Promise<void> {
+  await tx.query(
+    `INSERT INTO relations (
+       id, source_id, target_id, relation_type, weight, evidence_ref, created_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
+     ON CONFLICT (id) DO UPDATE SET
+       source_id = EXCLUDED.source_id,
+       target_id = EXCLUDED.target_id,
+       relation_type = EXCLUDED.relation_type,
+       weight = EXCLUDED.weight,
+       evidence_ref = EXCLUDED.evidence_ref`,
+    [
+      rel.id,
+      rel.sourceId,
+      rel.targetId,
+      rel.relationType,
+      rel.weight,
+      rel.evidenceRef,
+      rel.createdAt,
+    ],
+  );
+}
+
+/** Upserts an evidence ledger entry into PGLite inside an active transaction. */
+export async function upsertEvidenceRow(
+  tx: DbTransactionClient,
+  entry: EvidenceEntry,
+  contentHash: string,
+): Promise<void> {
+  await tx.query(
+    `INSERT INTO evidence_ledger (
+       id, project_id, target_subject, claim_kind, statement,
+       artifact_ref, verified_by, status, blocking, content_hash, created_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::timestamptz)
+     ON CONFLICT (id) DO UPDATE SET
+       project_id = EXCLUDED.project_id,
+       target_subject = EXCLUDED.target_subject,
+       claim_kind = EXCLUDED.claim_kind,
+       statement = EXCLUDED.statement,
+       artifact_ref = EXCLUDED.artifact_ref,
+       verified_by = EXCLUDED.verified_by,
+       status = EXCLUDED.status,
+       blocking = EXCLUDED.blocking,
+       content_hash = EXCLUDED.content_hash,
+       created_at = EXCLUDED.created_at`,
+    [
+      entry.id,
+      entry.projectId,
+      entry.targetSubject,
+      entry.claimKind,
+      entry.statement,
+      entry.artifactRef ?? null,
+      entry.verifiedBy ?? null,
+      entry.status,
+      entry.blocking,
+      contentHash,
+      toIsoTimestamp(entry.createdAt),
+    ],
+  );
+}
+
+/** Upserts a requirements backlog entry into PGLite inside an active transaction. */
+export async function upsertRequirementRow(
+  tx: DbTransactionClient,
+  req: RequirementBacklog,
+  contentHash: string,
+): Promise<void> {
+  await tx.query(
+    `INSERT INTO requirements_backlog (
+       id, project_id, parent_run_id, source_station, severity, category,
+       title, description, acceptance_criteria, status, content_hash, created_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12::timestamptz)
+     ON CONFLICT (id) DO UPDATE SET
+       project_id = EXCLUDED.project_id,
+       parent_run_id = EXCLUDED.parent_run_id,
+       source_station = EXCLUDED.source_station,
+       severity = EXCLUDED.severity,
+       category = EXCLUDED.category,
+       title = EXCLUDED.title,
+       description = EXCLUDED.description,
+       acceptance_criteria = EXCLUDED.acceptance_criteria,
+       status = EXCLUDED.status,
+       content_hash = EXCLUDED.content_hash,
+       created_at = EXCLUDED.created_at`,
+    [
+      req.id,
+      req.projectId,
+      req.parentRunId ?? null,
+      req.sourceStation,
+      req.severity,
+      req.category,
+      req.title,
+      req.description,
+      JSON.stringify(req.acceptanceCriteria ?? []),
+      req.status,
+      contentHash,
+      toIsoTimestamp(req.createdAt),
+    ],
+  );
+}
+
+/** Computes a deterministic relation edge ID when an edge does not explicitly supply one. */
+export function deterministicRelationId(
+  sourceId: string,
+  targetId: string,
+  relationType: string,
+): string {
+  return `rel-${sha256Hex(`${sourceId}|${targetId}|${relationType}`).slice(0, 20)}`;
+}
+
 /**
  * Canonical disk-first knowledge vault store backed by Git-tracked Markdown files
  * under `vault/` and an embedded or external PGLite/PostgreSQL index.
@@ -338,6 +535,8 @@ export class VaultStore {
   public readonly vaultRoot: string;
   public readonly db: DbClient;
   public readonly pagesDir: string;
+  public readonly ledgerDir: string;
+  public readonly backlogDir: string;
   public readonly vectorDims: number;
 
   private readonly lockHandle: VaultLockHandle;
@@ -360,6 +559,8 @@ export class VaultStore {
     this.embeddingProvider = params.embeddingProvider;
     this.packs = params.packs;
     this.pagesDir = resolveSafeVaultPath(this.vaultRoot, "vault", "pages");
+    this.ledgerDir = resolveSafeVaultPath(this.vaultRoot, "vault", "ledger");
+    this.backlogDir = resolveSafeVaultPath(this.vaultRoot, "vault", "backlog");
   }
 
   /**
@@ -409,8 +610,13 @@ export class VaultStore {
     }
   }
 
+  /** Returns a loaded schema pack by name if registered on this vault. */
+  public getSchemaPack(name: string): SchemaPack | undefined {
+    return this.packs.get(name);
+  }
+
   /** Serializes disk+DB mutations in-process so concurrent calls never interleave. */
-  private enqueueOp<T>(fn: () => Promise<T>): Promise<T> {
+  public enqueueOp<T>(fn: () => Promise<T>): Promise<T> {
     const next = this.opQueue.then(fn, fn);
     this.opQueue = next.then(
       () => undefined,
@@ -480,6 +686,10 @@ export class VaultStore {
         await this.upsertPageAndChunks(tx, prepared);
       });
 
+      if (prepared.page.frontmatter.relations.length > 0 || existing !== null) {
+        await this.syncRelationsFromPages();
+      }
+
       return prepared.page;
     });
   }
@@ -530,7 +740,7 @@ export class VaultStore {
   public async reindexVault(): Promise<SyncReport> {
     return this.enqueueOp(async () => {
       await this.db.exec(
-        "TRUNCATE TABLE pages, evidence_ledger, requirements_backlog CASCADE;",
+        "TRUNCATE TABLE pages, chunks, relations, evidence_ledger, requirements_backlog CASCADE;",
       );
       return this.syncVaultUnlocked();
     });
@@ -545,9 +755,258 @@ export class VaultStore {
     }
   }
 
-  /** Extension point for Task 7 to compose page, relation, ledger, and backlog syncs. */
+  /** Composes disk-wins sync across pages, relations, evidence ledger, and requirements backlog. */
   protected async syncVaultUnlocked(): Promise<SyncReport> {
-    return this.syncPages();
+    const pagesReport = await this.syncPages();
+    await this.syncRelationsFromPages();
+    const ledgerReport = await this.syncEvidenceLedger();
+    const backlogReport = await this.syncRequirementsBacklog();
+
+    return {
+      scanned:
+        pagesReport.scanned + ledgerReport.scanned + backlogReport.scanned,
+      indexed:
+        pagesReport.indexed + ledgerReport.indexed + backlogReport.indexed,
+      unchanged:
+        pagesReport.unchanged +
+        ledgerReport.unchanged +
+        backlogReport.unchanged,
+      deleted:
+        pagesReport.deleted + ledgerReport.deleted + backlogReport.deleted,
+    };
+  }
+
+  /**
+   * Reconciles `relations` table from `frontmatter.relations` across all indexed `pages`.
+   * Runs after `syncPages()` so all target page foreign keys already exist in `pages`.
+   */
+  protected async syncRelationsFromPages(): Promise<void> {
+    const pageRows = await this.db.query<{
+      id: string;
+      slug: string;
+      frontmatter: PageFrontmatter | string;
+    }>(`SELECT id, slug, frontmatter FROM pages ORDER BY slug ASC`);
+
+    const idSet = new Set<string>();
+    const slugToId = new Map<string, string>();
+    const leafToIds = new Map<string, string[]>();
+
+    for (const row of pageRows.rows) {
+      idSet.add(row.id);
+      slugToId.set(row.slug, row.id);
+      const leaf = path.posix.basename(row.slug);
+      const list = leafToIds.get(leaf);
+      if (list) {
+        list.push(row.id);
+      } else {
+        leafToIds.set(leaf, [row.id]);
+      }
+    }
+
+    const resolveTargetId = (ref: string): string | null => {
+      if (idSet.has(ref)) return ref;
+      const bySlug = slugToId.get(ref);
+      if (bySlug) return bySlug;
+      if (!ref.includes("/")) {
+        const matches = leafToIds.get(ref);
+        if (matches && matches.length === 1) {
+          return matches[0]!;
+        }
+      }
+      return null;
+    };
+
+    const desiredById = new Map<string, RelationDbRowInput>();
+
+    for (const row of pageRows.rows) {
+      const fm =
+        typeof row.frontmatter === "string"
+          ? (JSON.parse(row.frontmatter) as PageFrontmatter)
+          : row.frontmatter;
+      const edges = Array.isArray(fm?.relations) ? fm.relations : [];
+
+      for (const edge of edges) {
+        const relType = (
+          (typeof edge.relationType === "string" ? edge.relationType : "") ||
+          (typeof edge.type === "string" ? edge.type : "")
+        ).trim();
+        if (!relType) continue;
+
+        const targetRef = (
+          (typeof edge.targetId === "string" ? edge.targetId : "") ||
+          (typeof edge.target === "string" ? edge.target : "")
+        ).trim();
+        if (!targetRef) continue;
+
+        const targetId = resolveTargetId(targetRef);
+        if (!targetId) continue;
+
+        const edgeId =
+          typeof edge.id === "string" && edge.id.trim() !== ""
+            ? edge.id.trim()
+            : deterministicRelationId(row.id, targetId, relType);
+
+        const weight =
+          typeof edge.weight === "number" && Number.isFinite(edge.weight)
+            ? edge.weight
+            : 1.0;
+        const evidenceRef =
+          typeof edge.evidenceRef === "string" && edge.evidenceRef.trim() !== ""
+            ? edge.evidenceRef.trim()
+            : null;
+        const createdAt = toIsoTimestamp(
+          typeof edge.createdAt === "string" ? edge.createdAt : undefined,
+        );
+
+        desiredById.set(edgeId, {
+          id: edgeId,
+          sourceId: row.id,
+          targetId,
+          relationType: relType,
+          weight,
+          evidenceRef,
+          createdAt,
+        });
+      }
+    }
+
+    const existingRows = await this.db.query<{ id: string }>(
+      `SELECT id FROM relations`,
+    );
+    const staleIds = existingRows.rows
+      .map((r) => r.id)
+      .filter((id) => !desiredById.has(id));
+
+    if (staleIds.length === 0 && desiredById.size === 0) {
+      return;
+    }
+
+    await this.db.transaction(async (tx) => {
+      for (const staleId of staleIds) {
+        await tx.query(`DELETE FROM relations WHERE id = $1`, [staleId]);
+      }
+      for (const rel of desiredById.values()) {
+        await upsertRelationRow(tx, rel);
+      }
+    });
+  }
+
+  /**
+   * Scans `vault/ledger/<subject>/<id>.md`, applies disk-wins sync by `content_hash`,
+   * and prunes deleted rows from `evidence_ledger`.
+   */
+  protected async syncEvidenceLedger(): Promise<SyncReport> {
+    return this.syncMarkdownCollection<EvidenceEntry>({
+      dir: this.ledgerDir,
+      table: "evidence_ledger",
+      parseEntry: (rawFm, id, filePath) => {
+        const relDir = path
+          .dirname(path.relative(this.ledgerDir, filePath))
+          .split(path.sep)
+          .join("/");
+        const fallbackSubject = relDir === "." ? "" : relDir;
+        return EvidenceEntrySchema.parse({
+          ...rawFm,
+          id,
+          ...(rawFm.targetSubject === undefined && fallbackSubject
+            ? { targetSubject: fallbackSubject }
+            : {}),
+        });
+      },
+      upsert: upsertEvidenceRow,
+    });
+  }
+
+  /**
+   * Scans `vault/backlog/<id>.md`, applies disk-wins sync by `content_hash`,
+   * and prunes deleted rows from `requirements_backlog`.
+   */
+  protected async syncRequirementsBacklog(): Promise<SyncReport> {
+    return this.syncMarkdownCollection<RequirementBacklog>({
+      dir: this.backlogDir,
+      table: "requirements_backlog",
+      parseEntry: (rawFm, id) =>
+        RequirementBacklogSchema.parse({
+          ...rawFm,
+          id,
+        }),
+      upsert: upsertRequirementRow,
+    });
+  }
+
+  private async syncMarkdownCollection<T>(opts: {
+    dir: string;
+    table: "evidence_ledger" | "requirements_backlog";
+    parseEntry: (
+      rawFm: Record<string, unknown>,
+      id: string,
+      filePath: string,
+    ) => T;
+    upsert: (
+      tx: DbTransactionClient,
+      entry: T,
+      contentHash: string,
+    ) => Promise<void>;
+  }): Promise<SyncReport> {
+    const diskFiles = await collectMarkdownFiles(opts.dir);
+    const dbRowsRes = await this.db.query<{
+      id: string;
+      content_hash: string | null;
+    }>(`SELECT id, content_hash FROM ${opts.table}`);
+
+    const existingById = new Map<string, string | null>();
+    for (const row of dbRowsRes.rows) {
+      existingById.set(row.id, row.content_hash);
+    }
+
+    const diskIds = new Set<string>();
+    const toIndex: Array<{ entry: T; contentHash: string }> = [];
+    let unchanged = 0;
+
+    for (const filePath of diskFiles) {
+      const raw = await fs.readFile(filePath, "utf8");
+      const parsed = parseMarkdownDocument(raw);
+      const rawFm = parsed.frontmatter;
+      const id =
+        typeof rawFm.id === "string" && rawFm.id.trim() !== ""
+          ? rawFm.id.trim()
+          : path.basename(filePath, ".md");
+      diskIds.add(id);
+
+      const existingHash = existingById.get(id);
+      if (existingHash !== undefined && existingHash === parsed.contentHash) {
+        unchanged++;
+        continue;
+      }
+
+      const entry = opts.parseEntry(rawFm, id, filePath);
+      toIndex.push({ entry, contentHash: parsed.contentHash });
+    }
+
+    const deletedIds: string[] = [];
+    for (const id of existingById.keys()) {
+      if (!diskIds.has(id)) {
+        deletedIds.push(id);
+      }
+    }
+
+    if (deletedIds.length > 0 || toIndex.length > 0) {
+      await this.db.transaction(async (tx) => {
+        for (const id of deletedIds) {
+          await tx.query(`DELETE FROM ${opts.table} WHERE id = $1`, [id]);
+        }
+        for (const item of toIndex) {
+          await opts.upsert(tx, item.entry, item.contentHash);
+        }
+      });
+    }
+
+    return {
+      scanned: diskFiles.length,
+      indexed: toIndex.length,
+      unchanged,
+      deleted: deletedIds.length,
+    };
   }
 
   /**
