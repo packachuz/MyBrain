@@ -1,4 +1,5 @@
 import { normalizeLineEndings } from "@mybrain/shared";
+import { FenceTracker } from "./fence";
 
 /**
  * A discrete chunk of Markdown content indexed for full-text and vector search.
@@ -57,76 +58,55 @@ export function chunkMarkdown(
   const headingStack: { level: number; token: string }[] = [];
   const sections: { headingPath: string; lines: string[] }[] = [];
 
-  let inFence = false;
-  let fenceChar = "";
-  let fenceLen = 0;
+  const tracker = new FenceTracker();
 
   let currentHeadingPath = "";
   let currentLines: string[] = [];
   let sectionHasContent = false;
 
   for (const line of lines) {
-    const trimmed = line.trimStart();
-    const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/);
+    const { insideFence } = tracker.processLine(line);
 
-    if (!inFence) {
-      if (fenceMatch && fenceMatch[1]) {
-        inFence = true;
-        fenceChar = fenceMatch[1][0] ?? "";
-        fenceLen = fenceMatch[1].length;
-        currentLines.push(line);
-        sectionHasContent = true;
-        continue;
-      }
-
-      // Check for heading: # Title
-      const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-      if (headingMatch && headingMatch[1] && headingMatch[2]) {
-        const level = headingMatch[1].length;
-        const cleanTitle = headingMatch[2].replace(/\s+#+\s*$/, "").trim();
-        const headingToken = `${headingMatch[1]} ${cleanTitle}`;
-
-        if (sectionHasContent && currentLines.some((l) => l.trim() !== "")) {
-          sections.push({
-            headingPath: currentHeadingPath,
-            lines: currentLines,
-          });
-          currentLines = [];
-          sectionHasContent = false;
-        }
-
-        // Pop headings with level >= new heading level
-        while (
-          headingStack.length > 0 &&
-          (headingStack[headingStack.length - 1]?.level ?? 0) >= level
-        ) {
-          headingStack.pop();
-        }
-        headingStack.push({ level, token: headingToken });
-        currentHeadingPath = headingStack.map((h) => h.token).join(" > ");
-
-        currentLines.push(line);
-        continue;
-      }
-
-      // Normal line
-      currentLines.push(line);
-      if (line.trim() !== "") {
-        sectionHasContent = true;
-      }
-    } else {
-      // Inside code fence
+    if (insideFence) {
       currentLines.push(line);
       sectionHasContent = true;
-      if (
-        fenceMatch &&
-        fenceMatch[1] &&
-        fenceMatch[1][0] === fenceChar &&
-        fenceMatch[1].length >= fenceLen &&
-        trimmed.slice(fenceMatch[1].length).trim() === ""
-      ) {
-        inFence = false;
+      continue;
+    }
+
+    // Check for heading outside code fence: # Title
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch && headingMatch[1] && headingMatch[2]) {
+      const level = headingMatch[1].length;
+      const cleanTitle = headingMatch[2].replace(/\s+#+\s*$/, "").trim();
+      const headingToken = `${headingMatch[1]} ${cleanTitle}`;
+
+      if (sectionHasContent && currentLines.some((l) => l.trim() !== "")) {
+        sections.push({
+          headingPath: currentHeadingPath,
+          lines: currentLines,
+        });
+        currentLines = [];
+        sectionHasContent = false;
       }
+
+      // Pop headings with level >= new heading level
+      while (
+        headingStack.length > 0 &&
+        (headingStack[headingStack.length - 1]?.level ?? 0) >= level
+      ) {
+        headingStack.pop();
+      }
+      headingStack.push({ level, token: headingToken });
+      currentHeadingPath = headingStack.map((h) => h.token).join(" > ");
+
+      currentLines.push(line);
+      continue;
+    }
+
+    // Normal line outside code fence
+    currentLines.push(line);
+    if (line.trim() !== "") {
+      sectionHasContent = true;
     }
   }
 

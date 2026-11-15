@@ -217,6 +217,32 @@ describe("Wikilink Extractor", () => {
     expect(extractWikilinks("No links in this text.")).toEqual([]);
     expect(extractWikilinks("")).toEqual([]);
   });
+
+  it("does not close code fence when line has trailing info string (Finding 1)", () => {
+    const body = [
+      "```markdown",
+      "```foo",
+      "Still inside code block: [[ignored/not-closed]]",
+      "```",
+      "Outside code block: [[valid/after-real-close]].",
+    ].join("\n");
+
+    const links = extractWikilinks(body);
+    expect(links).toEqual(["valid/after-real-close"]);
+  });
+
+  it("does not allow inline code backticks to span across paragraphs or lines (Finding 2)", () => {
+    const body = [
+      "Paragraph 1 has an orphan ` backtick here.",
+      "",
+      "Paragraph 2 has a valid link [[valid/paragraph-link]] and another orphan ` backtick.",
+      "",
+      "Paragraph 3 has another [[valid/third-link]].",
+    ].join("\n");
+
+    const links = extractWikilinks(body);
+    expect(links).toEqual(["valid/paragraph-link", "valid/third-link"]);
+  });
 });
 
 describe("Heading-Aware Chunker", () => {
@@ -304,6 +330,22 @@ describe("Heading-Aware Chunker", () => {
     expect(chunks.length).toBe(1);
     expect(chunks[0]!.headingPath).toBe("# Real Heading");
     expect(chunks[0]!.content).toContain("# this is a shell comment");
+  });
+
+  it("does not treat lines starting with fence chars and trailing text as closing fences (Finding 1)", () => {
+    const body = [
+      "# Real Heading",
+      "```markdown",
+      "```foo",
+      "# Not a real heading because still inside code fence",
+      "```",
+      "Text after true closing fence.",
+    ].join("\n");
+
+    const chunks = chunkMarkdown(body, { maxWords: 100, overlapWords: 10 });
+    expect(chunks.length).toBe(1);
+    expect(chunks[0]!.headingPath).toBe("# Real Heading");
+    expect(chunks[0]!.content).toContain("# Not a real heading");
   });
 
   it("performs sliding-window chunking with exact overlap when section exceeds maxWords", () => {

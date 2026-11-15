@@ -1,6 +1,7 @@
 import { parse, stringify } from "yaml";
 import type { ZodType } from "zod";
 import { normalizeLineEndings, sha256Hex } from "@mybrain/shared";
+import { FenceTracker } from "./fence";
 
 /**
  * Result of parsing a Markdown document containing optional YAML frontmatter.
@@ -93,41 +94,31 @@ export function serializeMarkdownDocument<T extends Record<string, unknown>>(
 }
 
 /**
- * Strips fenced code blocks (starting with 3+ backticks or tildes) to avoid extracting
- * wikilinks or headings inside code examples.
+ * Strips CommonMark fenced code blocks using shared FenceTracker.
  */
 function stripFencedCodeBlocks(text: string): string {
   const lines = text.split("\n");
   const result: string[] = [];
-  let inFence = false;
-  let fenceChar = "";
-  let fenceLen = 0;
+  const tracker = new FenceTracker();
 
   for (const line of lines) {
-    const trimmed = line.trimStart();
-    const match = trimmed.match(/^(`{3,}|~{3,})/);
-    if (!inFence) {
-      if (match && match[1]) {
-        inFence = true;
-        fenceChar = match[1][0] ?? "";
-        fenceLen = match[1].length;
-        continue;
-      }
+    const { insideFence } = tracker.processLine(line);
+    if (!insideFence) {
       result.push(line);
-    } else {
-      if (
-        match &&
-        match[1] &&
-        match[1][0] === fenceChar &&
-        match[1].length >= fenceLen &&
-        trimmed.slice(match[1].length).trim() === ""
-      ) {
-        inFence = false;
-        continue;
-      }
     }
   }
   return result.join("\n");
+}
+
+/**
+ * Strips inline code spans strictly within individual lines so orphan backticks
+ * never match across newlines or paragraphs.
+ */
+function stripInlineCodeLineByLine(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => line.replace(/(`+)(.*?)\1/g, ""))
+    .join("\n");
 }
 
 /**
@@ -142,7 +133,7 @@ export function extractWikilinks(body: string): string[] {
 
   const normalized = normalizeLineEndings(body);
   const withoutFences = stripFencedCodeBlocks(normalized);
-  const withoutInline = withoutFences.replace(/(`+)([\s\S]*?)\1/g, "");
+  const withoutInline = stripInlineCodeLineByLine(withoutFences);
 
   const matches = withoutInline.matchAll(/\[\[([^[\]|]+?)(?:\|[^[\]]*?)?\]\]/g);
   const result = new Set<string>();
