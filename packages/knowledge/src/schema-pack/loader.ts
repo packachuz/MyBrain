@@ -167,9 +167,19 @@ export function validateEntityAgainstPack(
     );
   }
 
+  // Handle schema attribute: default to pack.name if omitted/empty, reject if explicitly conflicting
+  const rawSchema = typeof raw.schema === "string" ? raw.schema.trim() : "";
+  if (rawSchema !== "" && rawSchema !== pack.name) {
+    throw new SchemaValidationError(
+      `Entity specifies schema "${raw.schema}" which does not match schema pack "${pack.name}"`,
+    );
+  }
+  const effectiveSchema = rawSchema !== "" ? rawSchema : pack.name;
+
   const candidate = {
     ...raw,
     type: effectiveType,
+    schema: effectiveSchema,
   };
 
   const parseResult = PageFrontmatterSchema.safeParse(candidate);
@@ -212,19 +222,10 @@ export function validateEntityAgainstPack(
   }
 
   // Validate relation edges if specified
-  if (
-    validated.relations &&
-    validated.relations.length > 0 &&
-    pack.relationTypes &&
-    pack.relationTypes.length > 0
-  ) {
+  if (validated.relations && validated.relations.length > 0) {
     for (const edge of validated.relations) {
-      const relType = edge.relationType ?? edge.type;
-      if (relType && !pack.relationTypes.includes(relType)) {
-        throw new SchemaValidationError(
-          `Unknown relation type "${relType}" on entity in schema pack "${pack.name}"`,
-        );
-      }
+      const relType = edge.relationType?.trim() || edge.type?.trim();
+      validateRelationAgainstPack(relType, pack);
     }
   }
 

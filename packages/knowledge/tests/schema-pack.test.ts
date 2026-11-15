@@ -234,6 +234,72 @@ requiredFrontmatter:
       expect(() => validateEntityAgainstPack(null, base)).toThrow(SchemaValidationError);
       expect(() => validateEntityAgainstPack("not an object", base)).toThrow(SchemaValidationError);
     });
+
+    test("Finding 1: defaults schema to pack.name when omitted and rejects schema mismatch", () => {
+      const factory = BUILTIN_PACKS["software-factory"]!;
+      // When schema is omitted, schema must not drift to "gbrain-base"
+      const validated = validateEntityAgainstPack(
+        { id: "spec-1", title: "Specification", type: "spec" },
+        factory,
+      );
+      expect(validated.schema).toBe("software-factory");
+
+      // When matching schema is explicitly provided
+      const explicit = validateEntityAgainstPack(
+        { id: "spec-2", title: "Spec 2", type: "spec", schema: "software-factory" },
+        factory,
+      );
+      expect(explicit.schema).toBe("software-factory");
+
+      // When conflicting schema is provided, reject
+      expect(() =>
+        validateEntityAgainstPack(
+          { id: "spec-3", title: "Spec 3", type: "spec", schema: "gbrain-base" },
+          factory,
+        ),
+      ).toThrow(SchemaValidationError);
+    });
+
+    test("Finding 2: handles empty relationType fallback to type and delegates relation validation", () => {
+      const factory = BUILTIN_PACKS["software-factory"]!;
+      // Empty relationType should fall back to type: "implements" and succeed
+      const valid = validateEntityAgainstPack(
+        {
+          id: "plan-1",
+          title: "Plan",
+          type: "plan",
+          relations: [{ targetId: "spec-1", relationType: "", type: "implements" }],
+        },
+        factory,
+      );
+      expect(valid.relations).toHaveLength(1);
+
+      // Empty relationType falling back to invalid type should throw
+      expect(() =>
+        validateEntityAgainstPack(
+          {
+            id: "plan-2",
+            title: "Plan 2",
+            type: "plan",
+            relations: [{ targetId: "spec-1", relationType: "", type: "invalid_rel" }],
+          },
+          factory,
+        ),
+      ).toThrow(SchemaValidationError);
+
+      // Edge with whitespace-only relation should throw
+      expect(() =>
+        validateEntityAgainstPack(
+          {
+            id: "plan-3",
+            title: "Plan 3",
+            type: "plan",
+            relations: [{ targetId: "spec-1", relationType: "   ", type: "   " }],
+          },
+          factory,
+        ),
+      ).toThrow(SchemaValidationError);
+    });
   });
 
   describe("validateRelationAgainstPack", () => {
