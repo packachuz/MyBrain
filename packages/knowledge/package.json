@@ -8,7 +8,8 @@
     "./db/schema": "./src/db/schema.ts",
     "./schema-pack/loader": "./src/schema-pack/loader.ts",
     "./markdown/frontmatter": "./src/markdown/frontmatter.ts",
-    "./markdown/chunker": "./src/markdown/chunker.ts"
+    "./markdown/chunker": "./src/markdown/chunker.ts",
+    "./vault/store": "./src/vault/store.ts"
   },
   "scripts": {
     "test": "bun test",
