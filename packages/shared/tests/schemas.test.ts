@@ -206,6 +206,33 @@ describe("Zod Contracts & Schemas", () => {
       });
       expect(fm.relations.length).toBe(2);
     });
+
+    test("Finding 3: RelationEdgeSchema rejects empty objects and incomplete edges", () => {
+      // Empty object
+      expect(() => RelationEdgeSchema.parse({})).toThrow();
+      // Only weight
+      expect(() => RelationEdgeSchema.parse({ weight: 1.0 })).toThrow();
+      // Target only (missing relation type)
+      expect(() => RelationEdgeSchema.parse({ target: "p2" })).toThrow();
+      expect(() => RelationEdgeSchema.parse({ targetId: "p2" })).toThrow();
+      // Relation type only (missing target)
+      expect(() => RelationEdgeSchema.parse({ type: "relates_to" })).toThrow();
+      expect(() => RelationEdgeSchema.parse({ relationType: "relates_to" })).toThrow();
+
+      // Valid combinations
+      expect(() =>
+        RelationEdgeSchema.parse({ target: "p2", type: "relates_to" }),
+      ).not.toThrow();
+      expect(() =>
+        RelationEdgeSchema.parse({ targetId: "p2", relationType: "relates_to" }),
+      ).not.toThrow();
+      expect(() =>
+        RelationEdgeSchema.parse({ target: "p2", relationType: "relates_to" }),
+      ).not.toThrow();
+      expect(() =>
+        RelationEdgeSchema.parse({ targetId: "p2", type: "relates_to" }),
+      ).not.toThrow();
+    });
   });
 
   describe("SchemaPackSchema", () => {

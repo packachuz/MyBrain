@@ -53,6 +53,8 @@ export type RequirementBacklog = z.infer<typeof RequirementBacklogSchema>;
 
 /**
  * Schema for a typed edge in the Knowledge Graph.
+ * Must specify at least one target identifier (targetId or target)
+ * and one relation type (relationType or type).
  */
 export const RelationEdgeSchema = z
   .object({
@@ -66,7 +68,14 @@ export const RelationEdgeSchema = z
     evidenceRef: z.string().optional(),
     createdAt: z.string().optional(),
   })
-  .passthrough();
+  .passthrough()
+  .refine(
+    (e) => Boolean(e.targetId || e.target) && Boolean(e.relationType || e.type),
+    {
+      message:
+        "Relation edge must specify a target (targetId or target) and a relation type (relationType or type)",
+    },
+  );
 
 export type RelationEdge = z.infer<typeof RelationEdgeSchema>;
 
